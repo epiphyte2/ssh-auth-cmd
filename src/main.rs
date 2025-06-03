@@ -3,6 +3,7 @@ use std::env;
 use std::fs::{self, Permissions};
 use std::io::{self, Write, BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::prelude::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
