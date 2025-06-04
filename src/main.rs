@@ -1,7 +1,7 @@
 use std::env;
 use std::fs::{self, Permissions};
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::prelude::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use std::thread;
 use serde::{Deserialize, Serialize};
 use clap::{Args, Parser, Subcommand};
+use nix::unistd::{Uid, Gid, User};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CommandConfig {
@@ -180,19 +181,18 @@ fn check_config_directory_permissions() -> Result<()> {
     
     let permissions = metadata.permissions();
 
+    // Check that directory is not writable by group or others
     if permissions.mode() & 0o022 != 0 {
         return Err(AuthError::PermissionError(
             format!("Configuration directory {} is writable by group or others", CONFIG_DIR)
         ));
     }
 
-    if get_current_uid() == 0 {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != 0 {
-            return Err(AuthError::PermissionError(
-                format!("Configuration directory {} is not owned by root", CONFIG_DIR)
-            ));
-        }
+    // Check ownership - must be owned by root (like sshd does)
+    if metadata.uid() != 0 {
+        return Err(AuthError::PermissionError(
+            format!("Configuration directory {} is not owned by root", CONFIG_DIR)
+        ));
     }
 
     Ok(())
@@ -204,19 +204,18 @@ fn check_config_file_permissions(path: &Path) -> Result<()> {
     
     let permissions = metadata.permissions();
 
+    // Check that file is not writable by group or others
     if permissions.mode() & 0o022 != 0 {
         return Err(AuthError::PermissionError(
             format!("Configuration file {} is writable by group or others", path.display())
         ));
     }
 
-    if get_current_uid() == 0 {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != 0 {
-            return Err(AuthError::PermissionError(
-                format!("Configuration file {} is not owned by root", path.display())
-            ));
-        }
+    // Check ownership - must be owned by root (like sshd does)
+    if metadata.uid() != 0 {
+        return Err(AuthError::PermissionError(
+            format!("Configuration file {} is not owned by root", path.display())
+        ));
     }
 
     Ok(())
@@ -258,7 +257,6 @@ fn load_all_configs() -> Result<Vec<CommandConfig>> {
 
 fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<()> {
     let timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT);
-    let current_uid = get_current_uid();
     let target_user = config.user.as_ref();
     let is_readonly = config.readonly.unwrap_or(false);
 
@@ -283,7 +281,8 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<()> {
     cmd.stderr(Stdio::piped())
         .stdin(Stdio::null());
 
-    if current_uid == 0 && target_user.is_some() {
+    // Only attempt user switching if we're root and a target user is specified
+    if is_running_as_root() && target_user.is_some() {
         let username = target_user.unwrap();
         let (uid, gid) = get_user_ids(username)?;
         cmd.uid(uid);
@@ -365,23 +364,16 @@ fn substitute_placeholders(arg: &str, context: &SshContext) -> Result<String> {
     Ok(result)
 }
 
-fn get_current_uid() -> u32 {
-    unsafe { libc::getuid() }
+fn is_running_as_root() -> bool {
+    Uid::effective().is_root()
 }
 
 fn get_user_ids(username: &str) -> Result<(u32, u32)> {
-    use std::ffi::CString;
-
-    let c_username = CString::new(username)
-        .map_err(|e| AuthError::UserNotFound(format!("Invalid username '{}': {}", username, e)))?;
+    let user = User::from_name(username)
+        .map_err(|e| AuthError::UserNotFound(format!("Failed to lookup user '{}': {}", username, e)))?
+        .ok_or_else(|| AuthError::UserNotFound(format!("User '{}' not found", username)))?;
     
-    let passwd = unsafe { libc::getpwnam(c_username.as_ptr()) };
-
-    if passwd.is_null() {
-        return Err(AuthError::UserNotFound(format!("User '{}' not found", username)));
-    }
-
-    Ok(unsafe { ((*passwd).pw_uid, (*passwd).pw_gid) })
+    Ok((user.uid.as_raw(), user.gid.as_raw()))
 }
 
 fn wait_with_timeout(mut child: std::process::Child, timeout_secs: u64) -> Result<std::process::Output> {
@@ -454,19 +446,18 @@ fn check_command_permissions(command_path: &str) -> Result<()> {
     
     let permissions = metadata.permissions();
 
+    // Check that command is not writable by group or others
     if permissions.mode() & 0o022 != 0 {
         return Err(AuthError::PermissionError(
             format!("Command '{}' is writable by group or others", command_path)
         ));
     }
 
-    if get_current_uid() == 0 {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != 0 {
-            return Err(AuthError::PermissionError(
-                format!("Command '{}' is not owned by root", command_path)
-            ));
-        }
+    // Check ownership - must be owned by root (like sshd does)
+    if metadata.uid() != 0 {
+        return Err(AuthError::PermissionError(
+            format!("Command '{}' is not owned by root", command_path)
+        ));
     }
 
     Ok(())
