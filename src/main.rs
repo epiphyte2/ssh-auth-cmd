@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::thread;
 use serde::{Deserialize, Serialize};
-use clap::{Arg, Command as ClapCommand, ArgMatches};
+use clap::{Arg, ArgMatches, Args, Command as ClapCommand, Parser, Subcommand};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CommandConfig {
@@ -20,6 +20,71 @@ struct CommandConfig {
     timeout: Option<u64>,
     user: Option<String>,
     readonly: Option<bool>,
+}
+
+#[derive(Parser)]
+#[command(name = "ssh-auth-cmd")]
+#[command(version = "0.1.0")]
+#[command(about = "Chainable SSH AuthorizedKeysCommand")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Execute key commands (used by OpenSSH)
+    KeyCmd(KeyCmdArgs),
+    /// Check configuration files and permissions
+    ConfigCheck,
+    /// Install ssh-auth-cmd into OpenSSH configuration
+    Install(InstallArgs),
+}
+
+#[derive(Args)]
+struct KeyCmdArgs {
+    /// Connection specification (%C)
+    #[arg(short = 'c', long = "connection-spec")]
+    connection_spec: Option<String>,
+    
+    /// Routing domain (%D)
+    #[arg(short = 'D', long = "routing-domain")]
+    routing_domain: Option<String>,
+    
+    /// Key fingerprint (%f)
+    #[arg(short = 'f', long = "fingerprint")]
+    fingerprint: Option<String>,
+    
+    /// Hostname (%h)
+    #[arg(short = 'h', long = "hostname")]
+    hostname: Option<String>,
+    
+    /// Key (%k)
+    #[arg(short = 'k', long = "key")]
+    key: Option<String>,
+    
+    /// Key type (%t)
+    #[arg(short = 't', long = "key-type")]
+    key_type: Option<String>,
+    
+    /// Original user (%U)
+    #[arg(short = 'U', long = "original-user")]
+    original_user: Option<String>,
+    
+    /// User (%u)
+    #[arg(short = 'u', long = "user", required = true)]
+    user: String,
+}
+
+#[derive(Args)]
+struct InstallArgs {
+    /// OpenSSH config file path
+    #[arg(long = "config")]
+    config: Option<String>,
+    
+    /// AuthorizedKeysCommandUser
+    #[arg(long = "user")]
+    user: Option<String>,
 }
 
 const CONFIG_DIR: &str = "/etc/ssh-auth-cmd.d";
@@ -65,40 +130,49 @@ impl std::error::Error for AuthError {}
 type Result<T> = std::result::Result<T, AuthError>;
 
 fn main() {
-    let matches = build_cli().get_matches();
+    let cli = Cli::parse();
 
-    let result = match matches.subcommand() {
-        Some(("key-cmd", sub_matches)) => {
-            let context = parse_ssh_context(sub_matches);
+    let result = match cli.command {
+        Commands::KeyCmd(ref args) => {
+            let context = SshContext::from_args(&args);
             run_auth_commands(&context).map_err(|e| e.to_string())
         },
-        Some(("config-check", _)) => {
+        Commands::ConfigCheck => {
             config_check().map_err(|e| e.to_string())
         },
-        Some(("install", sub_matches)) => {
-            let config_file = sub_matches.get_one::<String>("config")
-                .map(|s| s.as_str())
-                .unwrap_or(SSHD_CONFIG_DEFAULT);
-            let user = sub_matches.get_one::<String>("user").map(|s| s.as_str());
-
+        Commands::Install(ref args) => {
+            let config_file = args.config.as_deref().unwrap_or(SSHD_CONFIG_DEFAULT);
+            let user = args.user.as_deref();
             install_to_sshd_config(config_file, user).map_err(|e| e.to_string())
         },
-        _ => {
-            Err("Invalid usage. Use --help for usage information.".to_string())
-        }
     };
 
     match result {
         Ok(_) => {
-            if matches.subcommand_name() == Some("config-check") {
-                println!("Configuration check passed");
-            } else if matches.subcommand_name() == Some("install") {
-                println!("Installation completed successfully");
+            match cli.command {
+                Commands::ConfigCheck => println!("Configuration check passed"),
+                Commands::Install(_) => println!("Installation completed successfully"),
+                Commands::KeyCmd(_) => {}, // Output handled in run_auth_commands
             }
         },
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
+        }
+    }
+}
+
+impl SshContext {
+    fn from_args(args: &KeyCmdArgs) -> Self {
+        Self {
+            connection_spec: args.connection_spec.clone(),
+            routing_domain: args.routing_domain.clone(),
+            fingerprint: args.fingerprint.clone(),
+            hostname: args.hostname.clone(),
+            key: args.key.clone(),
+            key_type: args.key_type.clone(),
+            original_user: args.original_user.clone(),
+            user: args.user.clone(),
         }
     }
 }
