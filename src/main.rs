@@ -143,13 +143,10 @@ fn main() {
     }
 }
 
-
-
 fn run_auth_commands(context: &SshContext) -> Result<()> {
     check_config_directory_permissions()?;
 
     let configs = load_all_configs()?;
-    let mut all_keys = Vec::new();
 
     for config in &configs {
         if let Some(false) = config.enabled {
@@ -157,19 +154,13 @@ fn run_auth_commands(context: &SshContext) -> Result<()> {
         }
 
         match execute_command(config, context) {
-            Ok(mut keys) => {
-                if !config.readonly.unwrap_or(false) {
-                    all_keys.append(&mut keys);
-                }
+            Ok(_) => {
+                // Command executed successfully, output was handled directly
             },
             Err(e) => {
                 eprintln!("Warning: Command '{}' failed: {}", config.name, e);
             }
         }
-    }
-
-    for key in all_keys {
-        println!("{}", key);
     }
 
     Ok(())
@@ -265,10 +256,11 @@ fn load_all_configs() -> Result<Vec<CommandConfig>> {
     Ok(configs)
 }
 
-fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<Vec<String>> {
+fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<()> {
     let timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT);
     let current_uid = get_current_uid();
     let target_user = config.user.as_ref();
+    let is_readonly = config.readonly.unwrap_or(false);
 
     let mut cmd = Command::new(&config.command);
 
@@ -281,8 +273,14 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<Vec<S
         cmd.arg(&context.user);
     }
 
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    // Set stdout based on readonly flag
+    if is_readonly {
+        cmd.stdout(Stdio::null());
+    } else {
+        cmd.stdout(Stdio::inherit()); // Pass through to ssh-auth-cmd's stdout
+    }
+    
+    cmd.stderr(Stdio::piped())
         .stdin(Stdio::null());
 
     if current_uid == 0 && target_user.is_some() {
@@ -305,15 +303,7 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<Vec<S
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let keys: Vec<String> = stdout
-        .lines()
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| line.to_string())
-        .collect();
-
-    Ok(keys)
+    Ok(())
 }
 
 fn substitute_placeholders(arg: &str, context: &SshContext) -> Result<String> {
@@ -401,7 +391,8 @@ fn wait_with_timeout(mut child: std::process::Child, timeout_secs: u64) -> Resul
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = read_child_output(child.stdout.take())?;
+                // For inherit stdout, we don't need to read it
+                let stdout = Vec::new();
                 let stderr = read_child_output_stderr(child.stderr.take())?;
 
                 return Ok(std::process::Output {
@@ -423,15 +414,6 @@ fn wait_with_timeout(mut child: std::process::Child, timeout_secs: u64) -> Resul
             }
         }
     }
-}
-
-fn read_child_output(output: Option<std::process::ChildStdout>) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    if let Some(mut stream) = output {
-        stream.read_to_end(&mut buf)
-            .map_err(|e| AuthError::ExecutionError(format!("Failed to read child output: {}", e)))?;
-    }
-    Ok(buf)
 }
 
 fn read_child_output_stderr(output: Option<std::process::ChildStderr>) -> Result<Vec<u8>> {
