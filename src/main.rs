@@ -33,15 +33,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Execute key commands (used by OpenSSH)
-    KeyCmd(KeyCmdArgs),
+    KeyCmd(SshContext),
     /// Check configuration files and permissions
     ConfigCheck,
     /// Install ssh-auth-cmd into OpenSSH configuration
     Install(InstallArgs),
 }
 
-#[derive(Args)]
-struct KeyCmdArgs {
+#[derive(Args, Debug)]
+struct SshContext {
     /// Connection specification (%C)
     #[arg(short = 'c', long = "connection-spec")]
     connection_spec: Option<String>,
@@ -91,18 +91,6 @@ const DEFAULT_TIMEOUT: u64 = 30;
 const SSHD_CONFIG_DEFAULT: &str = "/etc/ssh/sshd_config";
 
 #[derive(Debug)]
-struct SshContext {
-    connection_spec: Option<String>,  // %C
-    routing_domain: Option<String>,   // %D
-    fingerprint: Option<String>,      // %f
-    hostname: Option<String>,         // %h
-    key: Option<String>,              // %k
-    key_type: Option<String>,         // %t
-    original_user: Option<String>,    // %U
-    user: String,                     // %u
-}
-
-#[derive(Debug)]
 enum AuthError {
     ConfigurationError(String),
     PermissionError(String),
@@ -131,10 +119,7 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::KeyCmd(ref args) => {
-            let context = SshContext::from_args(&args);
-            run_auth_commands(&context)
-        },
+        Commands::KeyCmd(ref context) => run_auth_commands(&context),
         Commands::ConfigCheck => config_check(),
         Commands::Install(ref args) => {
             let config_file = args.config.as_deref().unwrap_or(SSHD_CONFIG_DEFAULT);
@@ -158,20 +143,7 @@ fn main() {
     }
 }
 
-impl SshContext {
-    fn from_args(args: &KeyCmdArgs) -> Self {
-        Self {
-            connection_spec: args.connection_spec.clone(),
-            routing_domain: args.routing_domain.clone(),
-            fingerprint: args.fingerprint.clone(),
-            hostname: args.hostname.clone(),
-            key: args.key.clone(),
-            key_type: args.key_type.clone(),
-            original_user: args.original_user.clone(),
-            user: args.user.clone(),
-        }
-    }
-}
+
 
 fn run_auth_commands(context: &SshContext) -> Result<()> {
     check_config_directory_permissions()?;
