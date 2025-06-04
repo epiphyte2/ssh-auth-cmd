@@ -6,6 +6,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::prelude::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use std::thread;
 use serde::{Deserialize, Serialize};
 use clap::{Arg, Command as ClapCommand, ArgMatches};
 
@@ -36,31 +38,42 @@ struct SshContext {
     user: String,                     // %u
 }
 
+// Custom error types for better error handling
+#[derive(Debug)]
+enum AuthError {
+    ConfigurationError(String),
+    PermissionError(String),
+    ExecutionError(String),
+    TimeoutError(String),
+    UserNotFound(String),
+}
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            AuthError::ConfigurationError(msg) => write!(f, "Configuration error: {}", msg),
+            AuthError::PermissionError(msg) => write!(f, "Permission error: {}", msg),
+            AuthError::ExecutionError(msg) => write!(f, "Execution error: {}", msg),
+            AuthError::TimeoutError(msg) => write!(f, "Timeout error: {}", msg),
+            AuthError::UserNotFound(msg) => write!(f, "User not found: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for AuthError {}
+
+type Result<T> = std::result::Result<T, AuthError>;
+
 fn main() {
     let matches = build_cli().get_matches();
 
-    match matches.subcommand() {
+    let result = match matches.subcommand() {
         Some(("key-cmd", sub_matches)) => {
             let context = parse_ssh_context(sub_matches);
-            match run_auth_commands(&context) {
-                Ok(_) => {},
-                Err(e) => {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            run_auth_commands(&context).map_err(|e| e.to_string())
         },
         Some(("config-check", _)) => {
-            match config_check() {
-                Ok(_) => {
-                    println!("Configuration check passed");
-                    std::process::exit(0);
-                },
-                Err(e) => {
-                    eprintln!("Configuration check failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            config_check().map_err(|e| e.to_string())
         },
         Some(("install", sub_matches)) => {
             let config_file = sub_matches.get_one::<String>("config")
@@ -68,19 +81,23 @@ fn main() {
                 .unwrap_or(SSHD_CONFIG_DEFAULT);
             let user = sub_matches.get_one::<String>("user").map(|s| s.as_str());
 
-            match install_to_sshd_config(config_file, user) {
-                Ok(_) => {
-                    println!("Installation completed successfully");
-                    std::process::exit(0);
-                },
-                Err(e) => {
-                    eprintln!("Installation failed: {}", e);
-                    std::process::exit(1);
-                }
-            }
+            install_to_sshd_config(config_file, user).map_err(|e| e.to_string())
         },
         _ => {
-            eprintln!("Invalid usage. Use --help for usage information.");
+            Err("Invalid usage. Use --help for usage information.".to_string())
+        }
+    };
+
+    match result {
+        Ok(_) => {
+            if matches.subcommand_name() == Some("config-check") {
+                println!("Configuration check passed");
+            } else if matches.subcommand_name() == Some("install") {
+                println!("Installation completed successfully");
+            }
+        },
+        Err(e) => {
+            eprintln!("Error: {}", e);
             std::process::exit(1);
         }
     }
@@ -127,7 +144,7 @@ fn parse_ssh_context(matches: &ArgMatches) -> SshContext {
     }
 }
 
-fn run_auth_commands(context: &SshContext) -> Result<(), Box<dyn std::error::Error>> {
+fn run_auth_commands(context: &SshContext) -> Result<()> {
     check_config_directory_permissions()?;
 
     let configs = load_all_configs()?;
@@ -161,53 +178,67 @@ fn run_auth_commands(context: &SshContext) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-fn check_config_directory_permissions() -> Result<(), Box<dyn std::error::Error>> {
+fn check_config_directory_permissions() -> Result<()> {
     let config_dir = Path::new(CONFIG_DIR);
 
     if !config_dir.exists() {
-        return Err(format!("Configuration directory {} does not exist", CONFIG_DIR).into());
+        return Err(AuthError::ConfigurationError(
+            format!("Configuration directory {} does not exist", CONFIG_DIR)
+        ));
     }
 
     // Check directory permissions - should be owned by root and not writable by others
-    let metadata = fs::metadata(config_dir)?;
+    let metadata = fs::metadata(config_dir)
+        .map_err(|e| AuthError::PermissionError(format!("Cannot read metadata for {}: {}", CONFIG_DIR, e)))?;
+    
     let permissions = metadata.permissions();
 
     if permissions.mode() & 0o022 != 0 {
-        return Err(format!("Configuration directory {} is writable by group or others", CONFIG_DIR).into());
+        return Err(AuthError::PermissionError(
+            format!("Configuration directory {} is writable by group or others", CONFIG_DIR)
+        ));
     }
 
     // Check if running as root to verify ownership
-    if unsafe { libc::getuid() } == 0 {
+    if get_current_uid() == 0 {
         use std::os::unix::fs::MetadataExt;
         if metadata.uid() != 0 {
-            return Err(format!("Configuration directory {} is not owned by root", CONFIG_DIR).into());
+            return Err(AuthError::PermissionError(
+                format!("Configuration directory {} is not owned by root", CONFIG_DIR)
+            ));
         }
     }
 
     Ok(())
 }
 
-fn check_config_file_permissions(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let metadata = fs::metadata(path)?;
+fn check_config_file_permissions(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .map_err(|e| AuthError::PermissionError(format!("Cannot read metadata for {}: {}", path.display(), e)))?;
+    
     let permissions = metadata.permissions();
 
     // Config files should not be writable by group or others
     if permissions.mode() & 0o022 != 0 {
-        return Err(format!("Configuration file {} is writable by group or others", path.display()).into());
+        return Err(AuthError::PermissionError(
+            format!("Configuration file {} is writable by group or others", path.display())
+        ));
     }
 
     // Check ownership if running as root
-    if unsafe { libc::getuid() } == 0 {
+    if get_current_uid() == 0 {
         use std::os::unix::fs::MetadataExt;
         if metadata.uid() != 0 {
-            return Err(format!("Configuration file {} is not owned by root", path.display()).into());
+            return Err(AuthError::PermissionError(
+                format!("Configuration file {} is not owned by root", path.display())
+            ));
         }
     }
 
     Ok(())
 }
 
-fn load_all_configs() -> Result<Vec<CommandConfig>, Box<dyn std::error::Error>> {
+fn load_all_configs() -> Result<Vec<CommandConfig>> {
     let config_dir = Path::new(CONFIG_DIR);
     let mut configs = Vec::new();
 
@@ -215,7 +246,9 @@ fn load_all_configs() -> Result<Vec<CommandConfig>, Box<dyn std::error::Error>> 
         return Ok(configs);
     }
 
-    let entries = fs::read_dir(config_dir)?;
+    let entries = fs::read_dir(config_dir)
+        .map_err(|e| AuthError::ConfigurationError(format!("Cannot read config directory: {}", e)))?;
+    
     let mut config_files: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
@@ -228,9 +261,11 @@ fn load_all_configs() -> Result<Vec<CommandConfig>, Box<dyn std::error::Error>> 
     for config_file in config_files {
         check_config_file_permissions(&config_file)?;
 
-        let config_content = fs::read_to_string(&config_file)?;
+        let config_content = fs::read_to_string(&config_file)
+            .map_err(|e| AuthError::ConfigurationError(format!("Cannot read config file {}: {}", config_file.display(), e)))?;
+        
         let config: CommandConfig = toml::from_str(&config_content)
-            .map_err(|e| format!("Failed to parse config file {}: {}", config_file.display(), e))?;
+            .map_err(|e| AuthError::ConfigurationError(format!("Failed to parse config file {}: {}", config_file.display(), e)))?;
 
         configs.push(config);
     }
@@ -238,11 +273,11 @@ fn load_all_configs() -> Result<Vec<CommandConfig>, Box<dyn std::error::Error>> 
     Ok(configs)
 }
 
-fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<Vec<String>> {
     let timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT);
 
     // Check if we need to switch user
-    let current_uid = unsafe { libc::getuid() };
+    let current_uid = get_current_uid();
     let target_user = config.user.as_ref();
 
     // Prepare command and arguments
@@ -266,18 +301,23 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<Vec<S
     // Switch user if running as root and user is specified
     if current_uid == 0 && target_user.is_some() {
         let username = target_user.unwrap();
-        cmd.uid(get_user_uid(username)?);
-        cmd.gid(get_user_gid(username)?);
+        let (uid, gid) = get_user_ids(username)?;
+        cmd.uid(uid);
+        cmd.gid(gid);
     }
 
     // Execute with timeout
-    let child = cmd.spawn()?;
+    let child = cmd.spawn()
+        .map_err(|e| AuthError::ExecutionError(format!("Failed to spawn command '{}': {}", config.command, e)))?;
+    
     let output = wait_with_timeout(child, timeout)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Command failed with exit code {:?}: {}",
-                           output.status.code(), stderr).into());
+        return Err(AuthError::ExecutionError(format!(
+            "Command '{}' failed with exit code {:?}: {}", 
+            config.name, output.status.code(), stderr
+        )));
     }
 
     // Parse output into individual keys
@@ -292,7 +332,7 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<Vec<S
     Ok(keys)
 }
 
-fn substitute_placeholders(arg: &str, context: &SshContext) -> Result<String, Box<dyn std::error::Error>> {
+fn substitute_placeholders(arg: &str, context: &SshContext) -> Result<String> {
     let mut result = String::new();
     let mut chars = arg.chars().peekable();
 
@@ -306,42 +346,42 @@ fn substitute_placeholders(arg: &str, context: &SshContext) -> Result<String, Bo
                     },
                     'C' => {
                         chars.next();
-                        result.push_str(&context.connection_spec.as_deref().unwrap_or(""));
+                        result.push_str(context.connection_spec.as_deref().unwrap_or(""));
                     },
                     'D' => {
                         chars.next();
-                        result.push_str(&context.routing_domain.as_deref().unwrap_or(""));
+                        result.push_str(context.routing_domain.as_deref().unwrap_or(""));
                     },
                     'f' => {
                         chars.next();
-                        result.push_str(&context.fingerprint.as_deref().unwrap_or(""));
+                        result.push_str(context.fingerprint.as_deref().unwrap_or(""));
                     },
                     'h' => {
                         chars.next();
-                        result.push_str(&context.hostname.as_deref().unwrap_or(""));
+                        result.push_str(context.hostname.as_deref().unwrap_or(""));
                     },
                     'k' => {
                         chars.next();
-                        result.push_str(&context.key.as_deref().unwrap_or(""));
+                        result.push_str(context.key.as_deref().unwrap_or(""));
                     },
                     't' => {
                         chars.next();
-                        result.push_str(&context.key_type.as_deref().unwrap_or(""));
+                        result.push_str(context.key_type.as_deref().unwrap_or(""));
                     },
                     'U' => {
                         chars.next();
-                        result.push_str(&context.original_user.as_deref().unwrap_or(""));
+                        result.push_str(context.original_user.as_deref().unwrap_or(""));
                     },
                     'u' => {
                         chars.next();
                         result.push_str(&context.user);
                     },
                     _ => {
-                        return Err(format!("Invalid placeholder: %{}", next_char).into());
+                        return Err(AuthError::ConfigurationError(format!("Invalid placeholder: %{}", next_char)));
                     }
                 }
             } else {
-                return Err("Incomplete placeholder at end of string".into());
+                return Err(AuthError::ConfigurationError("Incomplete placeholder at end of string".to_string()));
             }
         } else {
             result.push(ch);
@@ -351,59 +391,36 @@ fn substitute_placeholders(arg: &str, context: &SshContext) -> Result<String, Bo
     Ok(result)
 }
 
-fn get_user_uid(username: &str) -> Result<u32, Box<dyn std::error::Error>> {
+// Helper function to get current UID safely
+fn get_current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+// Combined function to get both UID and GID for a user
+fn get_user_ids(username: &str) -> Result<(u32, u32)> {
     use std::ffi::CString;
 
-    let c_username = CString::new(username)?;
+    let c_username = CString::new(username)
+        .map_err(|e| AuthError::UserNotFound(format!("Invalid username '{}': {}", username, e)))?;
+    
     let passwd = unsafe { libc::getpwnam(c_username.as_ptr()) };
 
     if passwd.is_null() {
-        return Err(format!("User '{}' not found", username).into());
+        return Err(AuthError::UserNotFound(format!("User '{}' not found", username)));
     }
 
-    Ok(unsafe { (*passwd).pw_uid })
+    Ok(unsafe { ((*passwd).pw_uid, (*passwd).pw_gid) })
 }
 
-fn get_user_gid(username: &str) -> Result<u32, Box<dyn std::error::Error>> {
-    use std::ffi::CString;
-
-    let c_username = CString::new(username)?;
-    let passwd = unsafe { libc::getpwnam(c_username.as_ptr()) };
-
-    if passwd.is_null() {
-        return Err(format!("User '{}' not found", username).into());
-    }
-
-    Ok(unsafe { (*passwd).pw_gid })
-}
-
-fn wait_with_timeout(mut child: std::process::Child, timeout_secs: u64) -> Result<std::process::Output, Box<dyn std::error::Error>> {
-    use std::time::{Duration, Instant};
-    use std::thread;
-
+fn wait_with_timeout(mut child: std::process::Child, timeout_secs: u64) -> Result<std::process::Output> {
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
 
     loop {
-        match child.try_wait()? {
-            Some(status) => {
-                let stdout = {
-                    let mut buf = Vec::new();
-                    if let Some(mut stdout) = child.stdout.take() {
-                        use std::io::Read;
-                        stdout.read_to_end(&mut buf)?;
-                    }
-                    buf
-                };
-
-                let stderr = {
-                    let mut buf = Vec::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        use std::io::Read;
-                        stderr.read_to_end(&mut buf)?;
-                    }
-                    buf
-                };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = read_child_output(child.stdout.take())?;
+                let stderr = read_child_stderr(child.stderr.take())?;
 
                 return Ok(std::process::Output {
                     status,
@@ -411,19 +428,46 @@ fn wait_with_timeout(mut child: std::process::Child, timeout_secs: u64) -> Resul
                     stderr,
                 });
             },
-            None => {
+            Ok(None) => {
                 if start.elapsed() >= timeout {
-                    child.kill()?;
-                    child.wait()?;
-                    return Err(format!("Command timed out after {} seconds", timeout_secs).into());
+                    let _ = child.kill(); // Ignore kill errors
+                    let _ = child.wait(); // Clean up zombie process
+                    return Err(AuthError::TimeoutError(format!("Command timed out after {} seconds", timeout_secs)));
                 }
                 thread::sleep(Duration::from_millis(100));
+            },
+            Err(e) => {
+                return Err(AuthError::ExecutionError(format!("Error waiting for child process: {}", e)));
             }
         }
     }
 }
 
-fn config_check() -> Result<(), Box<dyn std::error::Error>> {
+// Helper function to read output from child process
+fn read_child_output(output: Option<std::process::ChildStdout>) -> Result<Vec<u8>> {
+    use std::io::Read;
+    
+    let mut buf = Vec::new();
+    if let Some(mut stream) = output {
+        stream.read_to_end(&mut buf)
+            .map_err(|e| AuthError::ExecutionError(format!("Failed to read child output: {}", e)))?;
+    }
+    Ok(buf)
+}
+
+// Similar helper for stderr
+fn read_child_stderr(output: Option<std::process::ChildStderr>) -> Result<Vec<u8>> {
+    use std::io::Read;
+    
+    let mut buf = Vec::new();
+    if let Some(mut stream) = output {
+        stream.read_to_end(&mut buf)
+            .map_err(|e| AuthError::ExecutionError(format!("Failed to read child stderr: {}", e)))?;
+    }
+    Ok(buf)
+}
+
+fn config_check() -> Result<()> {
     // Check directory permissions
     check_config_directory_permissions()?;
 
@@ -431,7 +475,7 @@ fn config_check() -> Result<(), Box<dyn std::error::Error>> {
     let configs = load_all_configs()?;
 
     for config in &configs {
-        // Check that command binary exists and is only writable by root
+        // Check that command binary exists and has proper permissions
         check_command_permissions(&config.command)?;
 
         // Check argument substitutions
@@ -445,33 +489,39 @@ fn config_check() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn check_command_permissions(command_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn check_command_permissions(command_path: &str) -> Result<()> {
     let path = Path::new(command_path);
 
     if !path.exists() {
-        return Err(format!("Command '{}' does not exist", command_path).into());
+        return Err(AuthError::ConfigurationError(format!("Command '{}' does not exist", command_path)));
     }
 
-    let metadata = fs::metadata(path)?;
+    let metadata = fs::metadata(path)
+        .map_err(|e| AuthError::PermissionError(format!("Cannot read metadata for command '{}': {}", command_path, e)))?;
+    
     let permissions = metadata.permissions();
 
     // Command should not be writable by group or others
     if permissions.mode() & 0o022 != 0 {
-        return Err(format!("Command '{}' is writable by group or others", command_path).into());
+        return Err(AuthError::PermissionError(
+            format!("Command '{}' is writable by group or others", command_path)
+        ));
     }
 
     // Check ownership if running as root
-    if unsafe { libc::getuid() } == 0 {
+    if get_current_uid() == 0 {
         use std::os::unix::fs::MetadataExt;
         if metadata.uid() != 0 {
-            return Err(format!("Command '{}' is not owned by root", command_path).into());
+            return Err(AuthError::PermissionError(
+                format!("Command '{}' is not owned by root", command_path)
+            ));
         }
     }
 
     Ok(())
 }
 
-fn validate_argument_substitutions(arg: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_argument_substitutions(arg: &str) -> Result<()> {
     let mut chars = arg.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -482,11 +532,11 @@ fn validate_argument_substitutions(arg: &str) -> Result<(), Box<dyn std::error::
                         chars.next(); // consume the placeholder
                     },
                     _ => {
-                        return Err(format!("Invalid placeholder: %{}", next_char).into());
+                        return Err(AuthError::ConfigurationError(format!("Invalid placeholder: %{}", next_char)));
                     }
                 }
             } else {
-                return Err("Incomplete placeholder at end of string".into());
+                return Err(AuthError::ConfigurationError("Incomplete placeholder at end of string".to_string()));
             }
         }
     }
@@ -494,9 +544,10 @@ fn validate_argument_substitutions(arg: &str) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-fn install_to_sshd_config(config_file: &str, user_override: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn install_to_sshd_config(config_file: &str, user_override: Option<&str>) -> Result<()> {
     // Create config directory if it doesn't exist
-    fs::create_dir_all(CONFIG_DIR)?;
+    fs::create_dir_all(CONFIG_DIR)
+        .map_err(|e| AuthError::ConfigurationError(format!("Failed to create config directory: {}", e)))?;
 
     // Read and parse existing sshd_config
     let (existing_auth_cmd, existing_user) = parse_sshd_config(config_file)?;
@@ -515,8 +566,10 @@ fn install_to_sshd_config(config_file: &str, user_override: Option<&str>) -> Res
     Ok(())
 }
 
-fn parse_sshd_config(config_file: &str) -> Result<(Option<String>, Option<String>), Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(config_file)?;
+fn parse_sshd_config(config_file: &str) -> Result<(Option<String>, Option<String>)> {
+    let content = fs::read_to_string(config_file)
+        .map_err(|e| AuthError::ConfigurationError(format!("Cannot read sshd config file '{}': {}", config_file, e)))?;
+    
     let mut auth_cmd = None;
     let mut auth_user = None;
 
@@ -532,11 +585,11 @@ fn parse_sshd_config(config_file: &str) -> Result<(Option<String>, Option<String
     Ok((auth_cmd, auth_user))
 }
 
-fn migrate_existing_command(existing_cmd: &str, existing_user: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn migrate_existing_command(existing_cmd: &str, existing_user: Option<&str>) -> Result<()> {
     // Extract basename from the command path
     let cmd_parts: Vec<&str> = existing_cmd.split_whitespace().collect();
     if cmd_parts.is_empty() {
-        return Err("Empty existing command".into());
+        return Err(AuthError::ConfigurationError("Empty existing command".to_string()));
     }
 
     let cmd_path = Path::new(cmd_parts[0]);
@@ -549,7 +602,9 @@ fn migrate_existing_command(existing_cmd: &str, existing_user: Option<&str>) -> 
 
     // Check if file already exists
     if config_path.exists() {
-        return Err(format!("Configuration file {} already exists", config_path.display()).into());
+        return Err(AuthError::ConfigurationError(
+            format!("Configuration file {} already exists", config_path.display())
+        ));
     }
 
     // Create the migration config
@@ -567,40 +622,44 @@ fn migrate_existing_command(existing_cmd: &str, existing_user: Option<&str>) -> 
         readonly: Some(false),
     };
 
-    let toml_content = toml::to_string_pretty(&migration_config)?;
-    fs::write(&config_path, toml_content)?;
+    let toml_content = toml::to_string_pretty(&migration_config)
+        .map_err(|e| AuthError::ConfigurationError(format!("Failed to serialize migration config: {}", e)))?;
+    
+    fs::write(&config_path, toml_content)
+        .map_err(|e| AuthError::ConfigurationError(format!("Failed to write migration config: {}", e)))?;
 
     // Set proper permissions
-    let mut perms = fs::metadata(&config_path)?.permissions();
+    let mut perms = fs::metadata(&config_path)
+        .map_err(|e| AuthError::PermissionError(format!("Cannot read metadata for migration config: {}", e)))?
+        .permissions();
     perms.set_mode(0o600);
-    fs::set_permissions(&config_path, perms)?;
+    fs::set_permissions(&config_path, perms)
+        .map_err(|e| AuthError::PermissionError(format!("Cannot set permissions for migration config: {}", e)))?;
 
     println!("Migrated existing command to {}", config_path.display());
 
     Ok(())
 }
 
-fn update_sshd_config(config_file: &str, auth_user: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(config_file)?;
+fn update_sshd_config(config_file: &str, auth_user: &str) -> Result<()> {
+    let content = fs::read_to_string(config_file)
+        .map_err(|e| AuthError::ConfigurationError(format!("Cannot read sshd config file: {}", e)))?;
+    
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-
-    let mut found_auth_cmd = false;
-    let mut found_auth_user = false;
 
     // Update or comment out existing lines
     for line in &mut lines {
         let trimmed = line.trim();
         if trimmed.starts_with("AuthorizedKeysCommand ") && !trimmed.starts_with("#") {
             *line = format!("# {}", line); // Comment out old line
-            found_auth_cmd = true;
         } else if trimmed.starts_with("AuthorizedKeysCommandUser ") && !trimmed.starts_with("#") {
             *line = format!("# {}", line); // Comment out old line
-            found_auth_user = true;
         }
     }
 
     // Add new configuration
-    let current_exe = env::current_exe()?;
+    let current_exe = env::current_exe()
+        .map_err(|e| AuthError::ConfigurationError(format!("Cannot determine current executable path: {}", e)))?;
     let exe_path = current_exe.to_string_lossy();
 
     lines.push("# Added by ssh-auth-cmd install".to_string());
@@ -609,7 +668,8 @@ fn update_sshd_config(config_file: &str, auth_user: &str) -> Result<(), Box<dyn 
 
     // Write back to file
     let new_content = lines.join("\n");
-    fs::write(config_file, new_content)?;
+    fs::write(config_file, new_content)
+        .map_err(|e| AuthError::ConfigurationError(format!("Failed to write updated sshd config: {}", e)))?;
 
     println!("Updated OpenSSH configuration in {}", config_file);
 
