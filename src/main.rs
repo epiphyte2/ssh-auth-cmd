@@ -1,6 +1,6 @@
 use std::env;
-use std::fs::{self, Permissions};
-use std::io::{self, Read};
+use std::fs;
+use std::io::Read;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::prelude::CommandExt;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use std::thread;
 use serde::{Deserialize, Serialize};
 use clap::{Args, Parser, Subcommand};
-use nix::unistd::{Uid, Gid, User};
+use nix::unistd::{Uid, User};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CommandConfig {
