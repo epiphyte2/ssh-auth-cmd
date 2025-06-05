@@ -167,6 +167,29 @@ fn run_auth_commands(context: &SshContext) -> Result<()> {
     Ok(())
 }
 
+fn check_secure_permissions(path: &Path, item_type: &str) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .map_err(|e| AuthError::PermissionError(format!("Cannot read metadata for {}: {}", path.display(), e)))?;
+    
+    let permissions = metadata.permissions();
+
+    // Check that file/directory is not writable by group or others
+    if permissions.mode() & 0o022 != 0 {
+        return Err(AuthError::PermissionError(
+            format!("{} {} is writable by group or others", item_type, path.display())
+        ));
+    }
+
+    // Check ownership - must be owned by root (like sshd does)
+    if metadata.uid() != 0 {
+        return Err(AuthError::PermissionError(
+            format!("{} {} is not owned by root", item_type, path.display())
+        ));
+    }
+
+    Ok(())
+}
+
 fn check_config_directory_permissions() -> Result<()> {
     let config_dir = Path::new(CONFIG_DIR);
 
@@ -176,49 +199,11 @@ fn check_config_directory_permissions() -> Result<()> {
         ));
     }
 
-    let metadata = fs::metadata(config_dir)
-        .map_err(|e| AuthError::PermissionError(format!("Cannot read metadata for {}: {}", CONFIG_DIR, e)))?;
-    
-    let permissions = metadata.permissions();
-
-    // Check that directory is not writable by group or others
-    if permissions.mode() & 0o022 != 0 {
-        return Err(AuthError::PermissionError(
-            format!("Configuration directory {} is writable by group or others", CONFIG_DIR)
-        ));
-    }
-
-    // Check ownership - must be owned by root (like sshd does)
-    if metadata.uid() != 0 {
-        return Err(AuthError::PermissionError(
-            format!("Configuration directory {} is not owned by root", CONFIG_DIR)
-        ));
-    }
-
-    Ok(())
+    check_secure_permissions(config_dir, "Configuration directory")
 }
 
 fn check_config_file_permissions(path: &Path) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .map_err(|e| AuthError::PermissionError(format!("Cannot read metadata for {}: {}", path.display(), e)))?;
-    
-    let permissions = metadata.permissions();
-
-    // Check that file is not writable by group or others
-    if permissions.mode() & 0o022 != 0 {
-        return Err(AuthError::PermissionError(
-            format!("Configuration file {} is writable by group or others", path.display())
-        ));
-    }
-
-    // Check ownership - must be owned by root (like sshd does)
-    if metadata.uid() != 0 {
-        return Err(AuthError::PermissionError(
-            format!("Configuration file {} is not owned by root", path.display())
-        ));
-    }
-
-    Ok(())
+    check_secure_permissions(path, "Configuration file")
 }
 
 fn load_all_configs() -> Result<Vec<CommandConfig>> {
@@ -441,26 +426,7 @@ fn check_command_permissions(command_path: &str) -> Result<()> {
         return Err(AuthError::ConfigurationError(format!("Command '{}' does not exist", command_path)));
     }
 
-    let metadata = fs::metadata(path)
-        .map_err(|e| AuthError::PermissionError(format!("Cannot read metadata for command '{}': {}", command_path, e)))?;
-    
-    let permissions = metadata.permissions();
-
-    // Check that command is not writable by group or others
-    if permissions.mode() & 0o022 != 0 {
-        return Err(AuthError::PermissionError(
-            format!("Command '{}' is writable by group or others", command_path)
-        ));
-    }
-
-    // Check ownership - must be owned by root (like sshd does)
-    if metadata.uid() != 0 {
-        return Err(AuthError::PermissionError(
-            format!("Command '{}' is not owned by root", command_path)
-        ));
-    }
-
-    Ok(())
+    check_secure_permissions(path, "Command")
 }
 
 fn validate_argument_substitutions(arg: &str) -> Result<()> {
