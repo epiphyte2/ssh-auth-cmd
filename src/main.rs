@@ -20,8 +20,6 @@ struct CommandConfig {
     timeout: Option<u64>,
     user: Option<String>,
     readonly: Option<bool>,
-    /// If true, command execution will fail if user switching is requested but not possible
-    require_user_switch: Option<bool>,
 }
 
 #[derive(Parser)]
@@ -100,7 +98,6 @@ enum AuthError {
     ExecutionError(String),
     TimeoutError(String),
     UserNotFound(String),
-    UserSwitchError(String),
 }
 
 impl std::fmt::Display for AuthError {
@@ -111,7 +108,6 @@ impl std::fmt::Display for AuthError {
             AuthError::ExecutionError(msg) => write!(f, "Execution error: {}", msg),
             AuthError::TimeoutError(msg) => write!(f, "Timeout error: {}", msg),
             AuthError::UserNotFound(msg) => write!(f, "User not found: {}", msg),
-            AuthError::UserSwitchError(msg) => write!(f, "User switch error: {}", msg),
         }
     }
 }
@@ -310,7 +306,6 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<()> {
     let timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT);
     let target_user = config.user.as_ref();
     let is_readonly = config.readonly.unwrap_or(false);
-    let require_user_switch = config.require_user_switch.unwrap_or(false);
 
     let mut cmd = Command::new(&config.command);
 
@@ -333,26 +328,16 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<()> {
     cmd.stderr(Stdio::piped())
         .stdin(Stdio::null());
 
-    // Handle user switching logic
+    // Handle user switching if requested and possible
     if let Some(username) = target_user {
         if is_running_as_root() {
             let (uid, gid) = get_user_ids(username)?;
             cmd.uid(uid);
             cmd.gid(gid);
         } else {
-            // This should only happen if ssh-auth-cmd is misconfigured
-            // (AuthorizedKeysCommandUser not set to root)
-            if require_user_switch {
-                return Err(AuthError::UserSwitchError(format!(
-                    "Command '{}' requires user switching to '{}' but ssh-auth-cmd is not running as root. \
-                     Check that AuthorizedKeysCommandUser is set to 'root' in sshd_config",
-                    config.name, username
-                )));
-            } else {
-                eprintln!("Warning: Command '{}' specifies user '{}' but ssh-auth-cmd is not running as root. \
-                          Check that AuthorizedKeysCommandUser is set to 'root' in sshd_config", 
-                         config.name, username);
-            }
+            eprintln!("Warning: Command '{}' specifies user '{}' but ssh-auth-cmd is not running as root. \
+                      Check that AuthorizedKeysCommandUser is set to 'root' in sshd_config", 
+                     config.name, username);
         }
     }
 
@@ -622,7 +607,6 @@ fn migrate_existing_command(existing_cmd: &str, existing_user: Option<&str>) -> 
         timeout: Some(DEFAULT_TIMEOUT),
         user: existing_user.map(|u| u.to_string()),
         readonly: Some(false),
-        require_user_switch: Some(false), // Default to permissive for migrated configs
     };
 
     let toml_content = toml::to_string_pretty(&migration_config)
