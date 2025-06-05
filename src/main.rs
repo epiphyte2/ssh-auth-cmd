@@ -244,22 +244,65 @@ fn load_all_configs() -> Result<Vec<CommandConfig>> {
     Ok(configs)
 }
 
-fn check_user_switch_capability(config: &CommandConfig) -> Result<()> {
-    if let Some(ref username) = config.user {
-        if !is_running_as_root() {
-            let require_switch = config.require_user_switch.unwrap_or(false);
-            
-            if require_switch {
-                return Err(AuthError::UserSwitchError(format!(
-                    "Command '{}' requires user switching to '{}' but not running as root",
-                    config.name, username
-                )));
-            }
-        } else {
-            // Verify the target user exists
-            get_user_ids(username)?;
+fn check_sshd_user_configuration(configs_with_users: &[&CommandConfig]) -> Result<()> {
+    // Try common sshd_config locations
+    let possible_configs = [
+        "/etc/ssh/sshd_config",
+        "/etc/sshd_config", 
+        "/usr/local/etc/ssh/sshd_config",
+    ];
+
+    let mut sshd_config_path = None;
+    for path in &possible_configs {
+        if Path::new(path).exists() {
+            sshd_config_path = Some(*path);
+            break;
         }
     }
+
+    let config_path = sshd_config_path.ok_or_else(|| {
+        AuthError::ConfigurationError(
+            "Cannot find sshd_config file to verify AuthorizedKeysCommandUser setting".to_string()
+        )
+    })?;
+
+    let (auth_cmd, auth_user) = parse_sshd_config(config_path)?;
+
+    // Check if ssh-auth-cmd is configured
+    if auth_cmd.is_none() {
+        return Err(AuthError::ConfigurationError(
+            "No AuthorizedKeysCommand found in sshd_config, but command configs specify user switching".to_string()
+        ));
+    }
+
+    // Check if the command looks like it's pointing to ssh-auth-cmd
+    let auth_cmd = auth_cmd.unwrap();
+    if !auth_cmd.contains("ssh-auth-cmd") {
+        eprintln!("Warning: AuthorizedKeysCommand doesn't appear to use ssh-auth-cmd: {}", auth_cmd);
+    }
+
+    // Check AuthorizedKeysCommandUser
+    let auth_user = auth_user.ok_or_else(|| {
+        AuthError::ConfigurationError(
+            "No AuthorizedKeysCommandUser specified in sshd_config, but command configs require user switching".to_string()
+        )
+    })?;
+
+    if auth_user != "root" {
+        let user_list: Vec<String> = configs_with_users.iter()
+            .map(|config| format!("'{}' (user: {})", 
+                config.name, 
+                config.user.as_ref().unwrap()
+            ))
+            .collect();
+
+        return Err(AuthError::ConfigurationError(format!(
+            "AuthorizedKeysCommandUser is set to '{}' but the following commands require user switching: {}\n\
+             Set AuthorizedKeysCommandUser to 'root' in {} to enable user switching",
+            auth_user, user_list.join(", "), config_path
+        )));
+    }
+
     Ok(())
 }
 
@@ -297,13 +340,17 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<()> {
             cmd.uid(uid);
             cmd.gid(gid);
         } else {
+            // This should only happen if ssh-auth-cmd is misconfigured
+            // (AuthorizedKeysCommandUser not set to root)
             if require_user_switch {
                 return Err(AuthError::UserSwitchError(format!(
-                    "Command '{}' requires user switching to '{}' but not running as root",
+                    "Command '{}' requires user switching to '{}' but ssh-auth-cmd is not running as root. \
+                     Check that AuthorizedKeysCommandUser is set to 'root' in sshd_config",
                     config.name, username
                 )));
             } else {
-                eprintln!("Warning: Command '{}' specifies user '{}' but not running as root - executing as current user", 
+                eprintln!("Warning: Command '{}' specifies user '{}' but ssh-auth-cmd is not running as root. \
+                          Check that AuthorizedKeysCommandUser is set to 'root' in sshd_config", 
                          config.name, username);
             }
         }
@@ -441,12 +488,29 @@ fn config_check() -> Result<()> {
     check_config_directory_permissions()?;
     let configs = load_all_configs()?;
 
+    // Check if any configs specify user switching
+    let configs_with_users: Vec<_> = configs.iter()
+        .filter(|config| config.user.is_some())
+        .collect();
+
+    if !configs_with_users.is_empty() {
+        // Check sshd configuration to ensure it runs as root
+        check_sshd_user_configuration(&configs_with_users)?;
+    }
+
     for config in &configs {
         // Check command permissions
         check_command_permissions(&config.command)?;
 
-        // Check user switching capability - strict in config check mode
-        check_user_switch_capability(config)?;
+        // Check that specified users exist (if we can check)
+        if let Some(ref username) = config.user {
+            if let Err(e) = get_user_ids(username) {
+                return Err(AuthError::ConfigurationError(format!(
+                    "Command '{}' specifies user '{}' but user lookup failed: {}",
+                    config.name, username, e
+                )));
+            }
+        }
 
         // Validate argument substitutions
         if let Some(ref args) = config.args {
