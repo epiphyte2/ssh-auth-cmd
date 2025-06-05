@@ -20,6 +20,8 @@ struct CommandConfig {
     timeout: Option<u64>,
     user: Option<String>,
     readonly: Option<bool>,
+    /// If true, command execution will fail if user switching is requested but not possible
+    require_user_switch: Option<bool>,
 }
 
 #[derive(Parser)]
@@ -98,6 +100,7 @@ enum AuthError {
     ExecutionError(String),
     TimeoutError(String),
     UserNotFound(String),
+    UserSwitchError(String),
 }
 
 impl std::fmt::Display for AuthError {
@@ -108,6 +111,7 @@ impl std::fmt::Display for AuthError {
             AuthError::ExecutionError(msg) => write!(f, "Execution error: {}", msg),
             AuthError::TimeoutError(msg) => write!(f, "Timeout error: {}", msg),
             AuthError::UserNotFound(msg) => write!(f, "User not found: {}", msg),
+            AuthError::UserSwitchError(msg) => write!(f, "User switch error: {}", msg),
         }
     }
 }
@@ -240,10 +244,30 @@ fn load_all_configs() -> Result<Vec<CommandConfig>> {
     Ok(configs)
 }
 
+fn check_user_switch_capability(config: &CommandConfig) -> Result<()> {
+    if let Some(ref username) = config.user {
+        if !is_running_as_root() {
+            let require_switch = config.require_user_switch.unwrap_or(false);
+            
+            if require_switch {
+                return Err(AuthError::UserSwitchError(format!(
+                    "Command '{}' requires user switching to '{}' but not running as root",
+                    config.name, username
+                )));
+            }
+        } else {
+            // Verify the target user exists
+            get_user_ids(username)?;
+        }
+    }
+    Ok(())
+}
+
 fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<()> {
     let timeout = config.timeout.unwrap_or(DEFAULT_TIMEOUT);
     let target_user = config.user.as_ref();
     let is_readonly = config.readonly.unwrap_or(false);
+    let require_user_switch = config.require_user_switch.unwrap_or(false);
 
     let mut cmd = Command::new(&config.command);
 
@@ -266,12 +290,23 @@ fn execute_command(config: &CommandConfig, context: &SshContext) -> Result<()> {
     cmd.stderr(Stdio::piped())
         .stdin(Stdio::null());
 
-    // Only attempt user switching if we're root and a target user is specified
-    if is_running_as_root() && target_user.is_some() {
-        let username = target_user.unwrap();
-        let (uid, gid) = get_user_ids(username)?;
-        cmd.uid(uid);
-        cmd.gid(gid);
+    // Handle user switching logic
+    if let Some(username) = target_user {
+        if is_running_as_root() {
+            let (uid, gid) = get_user_ids(username)?;
+            cmd.uid(uid);
+            cmd.gid(gid);
+        } else {
+            if require_user_switch {
+                return Err(AuthError::UserSwitchError(format!(
+                    "Command '{}' requires user switching to '{}' but not running as root",
+                    config.name, username
+                )));
+            } else {
+                eprintln!("Warning: Command '{}' specifies user '{}' but not running as root - executing as current user", 
+                         config.name, username);
+            }
+        }
     }
 
     let child = cmd.spawn()
@@ -407,8 +442,13 @@ fn config_check() -> Result<()> {
     let configs = load_all_configs()?;
 
     for config in &configs {
+        // Check command permissions
         check_command_permissions(&config.command)?;
 
+        // Check user switching capability - strict in config check mode
+        check_user_switch_capability(config)?;
+
+        // Validate argument substitutions
         if let Some(ref args) = config.args {
             for arg in args {
                 validate_argument_substitutions(arg)?;
@@ -518,6 +558,7 @@ fn migrate_existing_command(existing_cmd: &str, existing_user: Option<&str>) -> 
         timeout: Some(DEFAULT_TIMEOUT),
         user: existing_user.map(|u| u.to_string()),
         readonly: Some(false),
+        require_user_switch: Some(false), // Default to permissive for migrated configs
     };
 
     let toml_content = toml::to_string_pretty(&migration_config)
