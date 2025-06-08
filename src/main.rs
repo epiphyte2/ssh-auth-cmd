@@ -87,7 +87,7 @@ struct InstallArgs {
     user: Option<String>,
 }
 
-const CONFIG_DIR: &str = "/etc/ssh-auth-cmd.d";
+const CONFIG_DIR: &str = "/etc/ssh/auth_cmd.d";
 const DEFAULT_TIMEOUT: u64 = 30;
 const SSHD_CONFIG_DEFAULT: &str = "/etc/ssh/sshd_config";
 

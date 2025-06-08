@@ -29,10 +29,10 @@ sudo /usr/local/bin/ssh-auth-cmd install --user nobody
 
 ## Configuration Directory Structure
 
-Commands are now configured in individual TOML files in `/etc/ssh-auth-cmd.d/`:
+Commands are now configured in individual TOML files in `/etc/ssh/auth_cmd.d/`:
 
 ```
-/etc/ssh-auth-cmd.d/
+/etc/ssh/auth_cmd.d/
 ├── 01-local-keys.toml
 ├── 02-ldap-keys.toml
 ├── 03-database-keys.toml
@@ -45,7 +45,7 @@ Files are processed in alphabetical order, so you can use prefixes to control ex
 
 Each configuration file contains a single command definition:
 
-### Example: `/etc/ssh-auth-cmd.d/01-local-keys.toml`
+### Example: `/etc/ssh/auth_cmd.d/01-local-keys.toml`
 ```toml
 name = "local_keys"
 command = "cat"
@@ -56,7 +56,7 @@ user = "nobody"
 readonly = false
 ```
 
-### Example: `/etc/ssh-auth-cmd.d/02-ldap-keys.toml`
+### Example: `/etc/ssh/auth_cmd.d/02-ldap-keys.toml`
 ```toml
 name = "ldap_keys"
 command = "/usr/local/bin/ldap-ssh-keys"
@@ -67,7 +67,7 @@ user = "ldap-user"
 readonly = false
 ```
 
-### Example: `/etc/ssh-auth-cmd.d/03-audit-only.toml`
+### Example: `/etc/ssh/auth_cmd.d/03-audit-only.toml`
 ```toml
 name = "audit_logger"
 command = "/usr/local/bin/ssh-audit-log"
@@ -177,11 +177,11 @@ sudo ssh-auth-cmd install --config /etc/ssh/sshd_config.custom
 ```
 
 The install command:
-- Migrates existing `AuthorizedKeysCommand` to a config file in `/etc/ssh-auth-cmd.d/`
+- Migrates existing `AuthorizedKeysCommand` to a config file in `/etc/ssh/auth_cmd.d/`
 - Comments out the old configuration
 - Adds the new ssh-auth-cmd configuration
 - Preserves existing `AuthorizedKeysCommandUser` settings when migrating
-- Will not overwrite existing files in `/etc/ssh-auth-cmd.d/`
+- Will not overwrite existing files in `/etc/ssh/auth_cmd.d/`
 
 ## Security Considerations
 
@@ -190,9 +190,9 @@ All configuration files and the configuration directory must have secure permiss
 
 ```bash
 # Set proper permissions
-sudo chown -R root:root /etc/ssh-auth-cmd.d/
-sudo chmod 755 /etc/ssh-auth-cmd.d/
-sudo chmod 600 /etc/ssh-auth-cmd.d/*.toml
+sudo chown -R root:root /etc/ssh/auth_cmd.d/
+sudo chmod 755 /etc/ssh/auth_cmd.d/
+sudo chmod 600 /etc/ssh/auth_cmd.d/*.toml
 ```
 
 The `config-check` command verifies these permissions automatically.
@@ -213,7 +213,7 @@ Different commands can run as different users for security isolation:
 
 ### Basic Local + LDAP Setup
 
-`/etc/ssh-auth-cmd.d/01-local.toml`:
+`/etc/ssh/auth_cmd.d/01-local.toml`:
 ```toml
 name = "local_keys"
 command = "cat"
@@ -223,7 +223,7 @@ timeout = 30
 user = "nobody"
 ```
 
-`/etc/ssh-auth-cmd.d/02-ldap.toml`:
+`/etc/ssh/auth_cmd.d/02-ldap.toml`:
 ```toml
 name = "ldap_lookup"
 command = "/usr/local/bin/ldap-ssh-keys"
@@ -235,7 +235,7 @@ user = "ldap-auth"
 
 ### Enterprise Setup with Audit Trail
 
-`/etc/ssh-auth-cmd.d/01-audit.toml`:
+`/etc/ssh/auth_cmd.d/01-audit.toml`:
 ```toml
 name = "connection_audit"
 command = "/usr/local/bin/log-ssh-attempt"
@@ -253,7 +253,7 @@ user = "audit"
 readonly = true  # Just for logging, don't provide keys
 ```
 
-`/etc/ssh-auth-cmd.d/02-corporate-keys.toml`:
+`/etc/ssh/auth_cmd.d/02-corporate-keys.toml`:
 ```toml
 name = "corporate_ldap"
 command = "/usr/local/bin/corporate-auth"
@@ -263,7 +263,7 @@ timeout = 60
 user = "corp-auth"
 ```
 
-`/etc/ssh-auth-cmd.d/03-emergency.toml`:
+`/etc/ssh/auth_cmd.d/03-emergency.toml`:
 ```toml
 name = "emergency_access"
 command = "/usr/local/bin/emergency-keys"
@@ -275,7 +275,7 @@ user = "emergency-auth"
 
 ### Development/Testing Setup
 
-`/etc/ssh-auth-cmd.d/01-local.toml`:
+`/etc/ssh/auth_cmd.d/01-local.toml`:
 ```toml
 name = "local_keys"
 command = "cat"
@@ -284,7 +284,7 @@ enabled = true
 timeout = 30
 ```
 
-`/etc/ssh-auth-cmd.d/02-shared-dev.toml`:
+`/etc/ssh/auth_cmd.d/02-shared-dev.toml`:
 ```toml
 name = "shared_dev_keys"
 command = "cat"
@@ -329,9 +329,9 @@ sudo ssh-auth-cmd key-cmd -c "testuser,192.168.1.100,22,10.0.0.1,22" -u testuser
 ### Permission Problems
 ```bash
 # Fix directory permissions
-sudo chown -R root:root /etc/ssh-auth-cmd.d/
-sudo chmod 755 /etc/ssh-auth-cmd.d/
-sudo chmod 600 /etc/ssh-auth-cmd.d/*.toml
+sudo chown -R root:root /etc/ssh/auth_cmd.d/
+sudo chmod 755 /etc/ssh/auth_cmd.d/
+sudo chmod 600 /etc/ssh/auth_cmd.d/*.toml
 
 # Check command permissions
 ls -la /usr/local/bin/your-auth-command
@@ -350,10 +350,10 @@ sudo tail -f /var/log/auth.log
 ### Common Issues
 
 1. **"Configuration directory is writable by group or others"**
-   - Fix: `sudo chmod 755 /etc/ssh-auth-cmd.d/`
+   - Fix: `sudo chmod 755 /etc/ssh/auth_cmd.d/`
 
 2. **"Configuration file is writable by group or others"**
-   - Fix: `sudo chmod 600 /etc/ssh-auth-cmd.d/*.toml`
+   - Fix: `sudo chmod 600 /etc/ssh/auth_cmd.d/*.toml`
 
 3. **"Command is not owned by root"**
    - Fix: `sudo chown root:root /path/to/command`
