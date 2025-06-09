@@ -225,9 +225,29 @@ name = "ssh-auth-cmd"
 version = "0.1.0"
 dependencies = [
  "clap",
- "libc",
  "nix",
  "serde",
+ "ssh-auth-common",
+ "toml",
+]
+
+[[package]]
+name = "ssh-auth-common"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "nix",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "ssh-auth-config"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "nix",
+ "ssh-auth-common",
  "toml",
 ]
 

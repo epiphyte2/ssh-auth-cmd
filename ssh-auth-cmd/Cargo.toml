@@ -1,0 +1,16 @@
+[package]
+name = "ssh-auth-cmd"
+version = "0.1.0"
+edition = "2021"
+description = "SSH AuthorizedKeysCommand multiplexer - authentication binary"
+
+[[bin]]
+name = "ssh-auth-cmd"
+path = "src/main.rs"
+
+[dependencies]
+ssh-auth-common.workspace = true
+clap = { version = "4.0", features = ["derive"] }
+nix = { version = "0.27", features = ["user"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
