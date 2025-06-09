@@ -6,10 +6,21 @@ members = [
     "ssh-auth-common"
 ]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Simeon Miteff", "Edwin Peer"]
+license = "MIT"
+repository = "https://github.com/epiphyte2/ssh-auth-cmd"
+homepage = "https://github.com/epiphyte2/ssh-auth-cmd"
+documentation = "https://docs.rs/ssh-auth-cmd"
+keywords = ["ssh", "authentication", "openssh", "security", "sysadmin"]
+categories = ["authentication", "command-line-utilities"]
+
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 clap = { version = "4.0", features = ["derive"] }
 libc = "0.2"
 nix = { version = "0.27", features = ["user"] }
-ssh-auth-common = { path = "ssh-auth-common" }
+ssh-auth-common = { version = "0.1.0", path = "ssh-auth-common" }

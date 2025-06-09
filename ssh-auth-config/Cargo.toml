@@ -1,8 +1,16 @@
 [package]
 name = "ssh-auth-config"
-version = "0.1.0"
-edition = "2021"
-description = "SSH AuthorizedKeysCommand multiplexer - configuration management binary"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "SSH AuthorizedKeysCommand multiplexer - configuration management utilities"
+readme = "../README.md"
 
 [[bin]]
 name = "ssh-auth-config"
@@ -10,6 +18,6 @@ path = "src/main.rs"
 
 [dependencies]
 ssh-auth-common.workspace = true
-clap = { version = "4.0", features = ["derive"] }
-toml = "0.8"
-nix = { version = "0.27", features = ["user"] }
+clap.workspace = true
+toml.workspace = true
+nix.workspace = true
